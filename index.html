@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>U47 Solo Verse — One Moment in Summer V19 | Practice Guide</title>
+<title>U47 Solo Verse — One Moment in Summer V20 | Practice Guide</title>
 <style>
  :root {
  --bg: #F5EDE0;
@@ -24,16 +24,17 @@
  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
  body {
  margin: 0;
- padding-bottom: 72px;
+ /* Room for tools dock (~72px) + fixed Model play bar (~56px) + gap */
+ padding-bottom: calc(160px + env(safe-area-inset-bottom, 0px));
  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
  background: var(--bg);
  color: var(--text);
  line-height: 1.45;
  overflow-x: hidden;
  }
- body.dock-open { padding-bottom: 240px; }
- body.dock-mini-timer-on { padding-bottom: 96px; }
- body.dock-open.dock-mini-timer-on { padding-bottom: 240px; }
+ body.dock-mini-timer-on { padding-bottom: calc(180px + env(safe-area-inset-bottom, 0px)); }
+ body.dock-open { padding-bottom: calc(320px + env(safe-area-inset-bottom, 0px)); }
+ body.dock-open.dock-mini-timer-on { padding-bottom: calc(320px + env(safe-area-inset-bottom, 0px)); }
 
  header {
  position: sticky; top: 0; z-index: 40;
