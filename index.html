@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>U47 Solo Verse — One Moment in Summer V20 | Practice Guide</title>
+<title>U47 Solo Verse — One Moment in Summer V21 | Practice Guide</title>
 <style>
  :root {
  --bg: #F5EDE0;
@@ -459,7 +459,7 @@
  <button type="button" class="chip-toggle on" id="togZh" aria-pressed="true">譯 中文</button>
  <button type="button" class="chip-toggle on" id="togCues" aria-pressed="true">💡 Notes</button>
 </div>
-<p class="tap-hint" id="tapHint">Tap a stanza (or the title) to hear that part of the Model · 點一節即可聽該段示範. On an https link, stanza taps play in-page; from Downloads, a YouTube window may open instead.</p>
+<p class="tap-hint" id="tapHint">Tap a stanza (or the title) to hear that part of the Model · 點一節即可聽該段示範. If there is no sound, tap ▶ on the video once · 沒聲音請點影片 ▶ 一次. From Downloads, a YouTube window may open instead.</p>
 
 <main>
  <!-- TAB 1: POEM & CUES -->
@@ -773,7 +773,7 @@
 <!-- Persistent YouTube host (not inside display:none tabs) -->
 <div class="yt-persist compact" id="ytPersist" aria-label="Model recital player">
  <div class="yt-frame-wrap">
- <iframe id="ytFrame" title="U47 One Moment in Summer Model" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin" src="about:blank"></iframe>
+ <div id="ytPlayer" title="U47 One Moment in Summer Model"></div>
  </div>
  <div class="yt-bar">
  <div class="yt-status" id="ytStatus">🎧 Tap a stanza to play</div>
@@ -1337,25 +1337,36 @@ window.addEventListener("pagehide", () => {
 })();
 
 
-// --- YouTube stanza cues (embed start/end — works from local Chrome files) ---
+// --- YouTube stanza cues (IFrame API — reliable mobile stanza play) ---
 const YT_ID = "m6QuyxwFZcU";
 const ytPersist = document.getElementById("ytPersist");
 const ytStatus = document.getElementById("ytStatus");
 const ytStopBtn = document.getElementById("ytStopBtn");
 const ytExpandBtn = document.getElementById("ytExpandBtn");
 const ytModelSlot = document.getElementById("ytModelSlot");
-const ytFrame = document.getElementById("ytFrame");
 let ytForceExpand = false;
 let ytPlayingLabel = "";
+let ytPlayer = null;
+let ytApiReady = false;
+let ytPendingPlay = null;
+let ytPollTimer = null;
+let ytRangeEnd = 0;
+let ytUnlocked = false;
 
 function setYtStatus(label) {
  if (ytStatus) ytStatus.innerHTML = "🎧 <span>" + label + "</span>";
 }
 
+function idleYtTip() {
+ return ytUnlocked
+  ? "Tap a stanza to play · 點詩節聽示範"
+  : "Tap a stanza · If no sound, tap ▶ once / 沒聲音請點影片 ▶ 一次";
+}
+
 function ytEmbedUrl(start, end, autoplay) {
  const s = Math.max(0, Math.floor(start));
  const e = Math.max(s + 1, Math.floor(end));
- let u = "https://www.youtube-nocookie.com/embed/" + YT_ID +
+ let u = "https://www.youtube.com/embed/" + YT_ID +
   "?start=" + s + "&end=" + e + "&rel=0&modestbranding=1&playsinline=1&enablejsapi=1";
  if (autoplay) u += "&autoplay=1";
  return u;
@@ -1365,73 +1376,138 @@ function syncYtLayout(tab) {
  if (!ytPersist) return;
  const wantExpand = ytForceExpand || tab === "viewSample";
  if (wantExpand && ytModelSlot && tab === "viewSample") {
- ytPersist.classList.remove("compact");
- ytPersist.classList.add("expanded");
- ytModelSlot.appendChild(ytPersist);
- if (ytExpandBtn) ytExpandBtn.textContent = "Hide";
+  ytPersist.classList.remove("compact");
+  ytPersist.classList.add("expanded");
+  ytModelSlot.appendChild(ytPersist);
+  if (ytExpandBtn) ytExpandBtn.textContent = "Hide";
  } else if (wantExpand && tab !== "viewSample") {
- // keep expanded mini video above dock while playing
- ytPersist.classList.remove("compact");
- ytPersist.classList.add("expanded");
- const dock = document.getElementById("bottomDock");
- if (dock && dock.parentNode) dock.parentNode.insertBefore(ytPersist, dock);
- else document.body.appendChild(ytPersist);
- if (ytExpandBtn) ytExpandBtn.textContent = "Hide";
+  // keep expanded mini video above dock while playing (needed so ▶ is tappable if autoplay blocked)
+  ytPersist.classList.remove("compact");
+  ytPersist.classList.add("expanded");
+  const dock = document.getElementById("bottomDock");
+  if (dock && dock.parentNode) dock.parentNode.insertBefore(ytPersist, dock);
+  else document.body.appendChild(ytPersist);
+  if (ytExpandBtn) ytExpandBtn.textContent = "Hide";
  } else {
- ytPersist.classList.add("compact");
- ytPersist.classList.remove("expanded");
- const dock = document.getElementById("bottomDock");
- if (dock && dock.parentNode) dock.parentNode.insertBefore(ytPersist, dock);
- else document.body.appendChild(ytPersist);
- if (ytExpandBtn) ytExpandBtn.textContent = "Show";
+  ytPersist.classList.add("compact");
+  ytPersist.classList.remove("expanded");
+  const dock = document.getElementById("bottomDock");
+  if (dock && dock.parentNode) dock.parentNode.insertBefore(ytPersist, dock);
+  else document.body.appendChild(ytPersist);
+  if (ytExpandBtn) ytExpandBtn.textContent = "Show";
  }
 }
 
 const isFilePage = (location.protocol === "file:");
 let ytPopup = null;
 
+function clearYtTimers() {
+ if (ytPollTimer) { clearInterval(ytPollTimer); ytPollTimer = null; }
+}
+
+function startRangeWatch(end) {
+ clearYtTimers();
+ ytRangeEnd = end;
+ ytPollTimer = setInterval(() => {
+  if (!ytPlayer || typeof ytPlayer.getCurrentTime !== "function") return;
+  try {
+   const t = ytPlayer.getCurrentTime();
+   if (t >= ytRangeEnd - 0.2) {
+    clearYtTimers();
+    try { ytPlayer.pauseVideo(); } catch (e) {}
+    document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
+    if (ytStopBtn) ytStopBtn.disabled = true;
+    ytPlayingLabel = "";
+    setYtStatus(idleYtTip());
+   }
+  } catch (e) {}
+ }, 200);
+}
+
+function onYtStateChange(ev) {
+ // 1 = PLAYING, 0 = ENDED, 2 = PAUSED
+ if (ev.data === 1) {
+  ytUnlocked = true;
+ }
+ if (ev.data === 0) {
+  clearYtTimers();
+  document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
+  if (ytStopBtn) ytStopBtn.disabled = true;
+  ytPlayingLabel = "";
+  setYtStatus(idleYtTip());
+ }
+}
+
+function playWithApi(start, end, label) {
+ const s = Math.max(0, Math.floor(start));
+ const e = Math.max(s + 1, Math.floor(end));
+ const rangeTxt = s + "s–" + e + "s";
+ if (!ytPlayer || typeof ytPlayer.loadVideoById !== "function") {
+  ytPendingPlay = { start: s, end: e, label: label || "Playing" };
+  setYtStatus("Loading player… · 載入中");
+  return;
+ }
+ clearYtTimers();
+ ytPlayingLabel = label || "Playing";
+ setYtStatus(ytPlayingLabel + " · " + rangeTxt + (ytUnlocked ? "" : " · If no sound, tap ▶ / 沒聲音點 ▶"));
+ if (ytStopBtn) ytStopBtn.disabled = false;
+
+ // Expand so ▶ is visible if the browser still blocks autoplay
+ ytForceExpand = true;
+ const tab = document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem";
+ syncYtLayout(tab);
+
+ try {
+  ytPlayer.loadVideoById({
+   videoId: YT_ID,
+   startSeconds: s,
+   endSeconds: e
+  });
+  try { ytPlayer.playVideo(); } catch (e2) {}
+  startRangeWatch(e);
+ } catch (err) {
+  setYtStatus("Could not play — tap ▶ on the video · 請點影片 ▶");
+ }
+}
+
 function playYtRange(start, end, label) {
  ytPlayingLabel = label || "Playing";
  const rangeTxt = Math.floor(start) + "s–" + Math.floor(end) + "s";
- const url = ytEmbedUrl(start, end, true);
  if (ytStopBtn) ytStopBtn.disabled = false;
 
  // YouTube usually blocks / blanks in-page embeds when the HTML is opened from Downloads (file://).
  // Reuse one https embed window instead — still driven by the stanza tap.
  if (isFilePage) {
- try {
- if (ytPopup && !ytPopup.closed) {
- ytPopup.location.href = url;
- ytPopup.focus();
- } else {
- ytPopup = window.open(url, "u47ModelPlayer", "popup=yes,width=560,height=320");
- }
- if (!ytPopup) {
- setYtStatus("Allow pop-ups once, then tap again · 請允許彈出式視窗");
- return;
- }
- setYtStatus(ytPlayingLabel + " · " + rangeTxt + " · YouTube window");
- } catch (e) {
- setYtStatus("Could not open YouTube — check pop-up blocker");
- }
- return;
+  const url = ytEmbedUrl(start, end, true);
+  try {
+   if (ytPopup && !ytPopup.closed) {
+    ytPopup.location.href = url;
+    ytPopup.focus();
+   } else {
+    ytPopup = window.open(url, "u47ModelPlayer", "popup=yes,width=560,height=320");
+   }
+   if (!ytPopup) {
+    setYtStatus("Allow pop-ups once, then tap again · 請允許彈出式視窗");
+    return;
+   }
+   setYtStatus(ytPlayingLabel + " · " + rangeTxt + " · YouTube window");
+  } catch (e) {
+   setYtStatus("Could not open YouTube — check pop-up blocker");
+  }
+  return;
  }
 
- if (!ytFrame) {
- setYtStatus("Player missing");
- return;
- }
- setYtStatus(ytPlayingLabel + " · " + rangeTxt);
- ytFrame.src = url;
- const tab = document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem";
- if (tab === "viewSample") ytForceExpand = true;
- syncYtLayout(tab);
+ playWithApi(start, end, label);
 }
 
 function stopYt() {
- if (ytFrame) ytFrame.src = "about:blank";
+ clearYtTimers();
+ ytPendingPlay = null;
+ if (ytPlayer && typeof ytPlayer.pauseVideo === "function") {
+  try { ytPlayer.pauseVideo(); } catch (e) {}
+ }
  if (ytPopup && !ytPopup.closed) {
- try { ytPopup.close(); } catch (e) {}
+  try { ytPopup.close(); } catch (e) {}
  }
  ytPopup = null;
  ytPlayingLabel = "";
@@ -1439,7 +1515,7 @@ function stopYt() {
  document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
  setYtStatus(isFilePage
   ? "Tap a stanza · opens YouTube window · 點詩節（本機檔會開小窗）"
-  : "Tap a stanza to play · 點詩節聽示範");
+  : idleYtTip());
 }
 
 ytStopBtn && (ytStopBtn.onclick = (ev) => { ev.stopPropagation(); stopYt(); });
@@ -1447,10 +1523,6 @@ ytExpandBtn && (ytExpandBtn.onclick = (ev) => {
  ev.stopPropagation();
  ytForceExpand = !ytForceExpand;
  const tab = document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem";
- // If expanding on Poem and nothing loaded yet, load title cue muted-ish ready
- if (ytForceExpand && ytFrame && (!ytFrame.src || ytFrame.src === "about:blank" || ytFrame.src.endsWith("about:blank"))) {
- ytFrame.src = ytEmbedUrl(0, 9, false);
- }
  syncYtLayout(tab);
 });
 
@@ -1461,10 +1533,57 @@ ytPersist && ytPersist.querySelector(".yt-bar")?.addEventListener("click", (ev) 
  if (titlePlay) titlePlay.click();
 });
 
+window.onYouTubeIframeAPIReady = function () {
+ ytApiReady = true;
+ if (isFilePage) return;
+ if (document.getElementById("ytPlayer") == null && !ytPlayer) return;
+ const playerVars = {
+  playsinline: 1,
+  rel: 0,
+  modestbranding: 1,
+  enablejsapi: 1,
+  origin: (location.protocol === "https:" || location.protocol === "http:") ? location.origin : undefined
+ };
+ if (!playerVars.origin) delete playerVars.origin;
+ const host = document.getElementById("ytPlayer");
+ if (!host && ytPlayer) return;
+ ytPlayer = new YT.Player(host || "ytPlayer", {
+  videoId: YT_ID,
+  width: "100%",
+  height: "100%",
+  playerVars: playerVars,
+  events: {
+   onReady: function (ev) {
+    ytPlayer = ev.target;
+    if (ytPendingPlay) {
+     const p = ytPendingPlay;
+     ytPendingPlay = null;
+     playWithApi(p.start, p.end, p.label);
+    }
+   },
+   onStateChange: onYtStateChange,
+   onError: function () {
+    ytForceExpand = true;
+    syncYtLayout(document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem");
+    setYtStatus("Player error — tap Show, then ▶ · 請按 Show 再點 ▶");
+   }
+  }
+ });
+};
+
+if (!isFilePage) {
+ const tag = document.createElement("script");
+ tag.src = "https://www.youtube.com/iframe_api";
+ const firstScript = document.getElementsByTagName("script")[0];
+ firstScript.parentNode.insertBefore(tag, firstScript);
+}
+
 if (isFilePage) {
  setYtStatus("Tap a stanza · opens YouTube window · 點詩節（本機檔會開小窗）");
  const hint = document.getElementById("tapHint");
  if (hint) hint.innerHTML = "Local file mode: each stanza opens a small YouTube window (in-page embed is blocked). Allow pop-ups for this file once. · 本機開啟時會開 YouTube 小窗，請允許彈出式視窗。";
+} else {
+ setYtStatus(idleYtTip());
 }
 syncYtLayout(document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem");
 
