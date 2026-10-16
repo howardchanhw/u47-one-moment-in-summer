@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>U47 Solo Verse — One Moment in Summer V21 | Practice Guide</title>
+<title>U47 Solo Verse — One Moment in Summer V22 | Practice Guide</title>
 <style>
  :root {
  --bg: #F5EDE0;
@@ -433,6 +433,7 @@
  .title-block { cursor: pointer; border-radius: 8px; }
  .title-block:focus-visible { outline: 3px solid var(--gold); outline-offset: 3px; }
  .tap-hint { font-size: .72rem; color: var(--muted); padding: 0 14px 6px; margin: 0; }
+ #modelAudio { display: none; }
 </style>
 </head>
 <body>
@@ -459,7 +460,7 @@
  <button type="button" class="chip-toggle on" id="togZh" aria-pressed="true">譯 中文</button>
  <button type="button" class="chip-toggle on" id="togCues" aria-pressed="true">💡 Notes</button>
 </div>
-<p class="tap-hint" id="tapHint">Tap a stanza (or the title) to hear that part of the Model · 點一節即可聽該段示範. If there is no sound, tap ▶ on the video once · 沒聲音請點影片 ▶ 一次. From Downloads, a YouTube window may open instead.</p>
+<p class="tap-hint" id="tapHint">Tap a stanza (or the title) to hear that part of the Model — audio plays from this page · 點一節即可聽該段示範（本頁音訊）. Use <strong>Show</strong> if you want to watch the YouTube video · 要看影片請按 Show. From Downloads (file://), use the https Pages link for audio.</p>
 
 <main>
  <!-- TAB 1: POEM & CUES -->
@@ -770,7 +771,10 @@
 </div>
 
 
-<!-- Persistent YouTube host (not inside display:none tabs) -->
+<!-- Hidden local model audio (primary stanza play on https Pages) -->
+<audio id="modelAudio" src="u47.m4a" preload="auto" playsinline></audio>
+
+<!-- Persistent YouTube host (visual Model / Show — not required for stanza sound) -->
 <div class="yt-persist compact" id="ytPersist" aria-label="Model recital player">
  <div class="yt-frame-wrap">
  <div id="ytPlayer" title="U47 One Moment in Summer Model"></div>
@@ -1337,30 +1341,34 @@ window.addEventListener("pagehide", () => {
 })();
 
 
-// --- YouTube stanza cues (IFrame API — reliable mobile stanza play) ---
+// --- V22: local HTML5 audio for stanza cues; YouTube optional (Show / Model tab) ---
 const YT_ID = "m6QuyxwFZcU";
+const MODEL_AUDIO_SRC = "u47.m4a";
 const ytPersist = document.getElementById("ytPersist");
 const ytStatus = document.getElementById("ytStatus");
 const ytStopBtn = document.getElementById("ytStopBtn");
 const ytExpandBtn = document.getElementById("ytExpandBtn");
 const ytModelSlot = document.getElementById("ytModelSlot");
+const modelAudio = document.getElementById("modelAudio");
 let ytForceExpand = false;
 let ytPlayingLabel = "";
 let ytPlayer = null;
 let ytApiReady = false;
-let ytPendingPlay = null;
+let ytPendingPlay = null; // unused for https audio path; kept for file:// popup only
 let ytPollTimer = null;
 let ytRangeEnd = 0;
-let ytUnlocked = false;
+let audioEndTimer = null;
+let audioRangeEnd = 0;
+let audioLabel = "";
 
 function setYtStatus(label) {
  if (ytStatus) ytStatus.innerHTML = "🎧 <span>" + label + "</span>";
 }
 
 function idleYtTip() {
- return ytUnlocked
-  ? "Tap a stanza to play · 點詩節聽示範"
-  : "Tap a stanza · If no sound, tap ▶ once / 沒聲音請點影片 ▶ 一次";
+ return isFilePage
+  ? "Tap a stanza · opens YouTube window · 點詩節（本機檔會開小窗）"
+  : "Tap a stanza to play · audio from this page · 點詩節聽示範（本頁音訊）";
 }
 
 function ytEmbedUrl(start, end, autoplay) {
@@ -1381,7 +1389,6 @@ function syncYtLayout(tab) {
   ytModelSlot.appendChild(ytPersist);
   if (ytExpandBtn) ytExpandBtn.textContent = "Hide";
  } else if (wantExpand && tab !== "viewSample") {
-  // keep expanded mini video above dock while playing (needed so ▶ is tappable if autoplay blocked)
   ytPersist.classList.remove("compact");
   ytPersist.classList.add("expanded");
   const dock = document.getElementById("bottomDock");
@@ -1405,29 +1412,106 @@ function clearYtTimers() {
  if (ytPollTimer) { clearInterval(ytPollTimer); ytPollTimer = null; }
 }
 
-function startRangeWatch(end) {
+function clearAudioTimers() {
+ if (audioEndTimer) { clearTimeout(audioEndTimer); audioEndTimer = null; }
+}
+
+function pauseYtQuiet() {
  clearYtTimers();
- ytRangeEnd = end;
- ytPollTimer = setInterval(() => {
-  if (!ytPlayer || typeof ytPlayer.getCurrentTime !== "function") return;
+ if (ytPlayer && typeof ytPlayer.pauseVideo === "function") {
+  try { ytPlayer.pauseVideo(); } catch (e) {}
+ }
+}
+
+function pauseModelAudioQuiet() {
+ clearAudioTimers();
+ if (modelAudio) {
+  try { modelAudio.pause(); } catch (e) {}
+ }
+}
+
+function finishAudioRange() {
+ clearAudioTimers();
+ if (modelAudio) {
+  try { modelAudio.pause(); } catch (e) {}
+ }
+ document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
+ if (ytStopBtn) ytStopBtn.disabled = true;
+ ytPlayingLabel = "";
+ audioLabel = "";
+ setYtStatus(idleYtTip());
+}
+
+function onModelTimeUpdate() {
+ if (!modelAudio) return;
+ if (audioRangeEnd > 0 && modelAudio.currentTime >= audioRangeEnd - 0.05) {
+  finishAudioRange();
+ }
+}
+
+function playWithLocalAudio(start, end, label) {
+ if (!modelAudio) {
+  setYtStatus("Audio missing — use https Pages link · 請用網頁連結");
+  return;
+ }
+ const s = Math.max(0, Number(start) || 0);
+ const e = Math.max(s + 0.5, Number(end) || s + 1);
+ const rangeTxt = Math.floor(s) + "s–" + Math.floor(e) + "s";
+ pauseYtQuiet();
+ clearAudioTimers();
+ audioRangeEnd = e;
+ audioLabel = label || "Playing";
+ ytPlayingLabel = audioLabel;
+ setYtStatus(audioLabel + " · " + rangeTxt);
+ if (ytStopBtn) ytStopBtn.disabled = false;
+
+ const startPlay = () => {
   try {
-   const t = ytPlayer.getCurrentTime();
-   if (t >= ytRangeEnd - 0.2) {
-    clearYtTimers();
-    try { ytPlayer.pauseVideo(); } catch (e) {}
-    document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
+   modelAudio.currentTime = s;
+  } catch (err) {}
+  const p = modelAudio.play();
+  if (p && typeof p.then === "function") {
+   p.then(() => {
+    // schedule a backup stop in case timeupdate is sparse
+    const ms = Math.max(200, (e - s) * 1000 + 150);
+    clearAudioTimers();
+    audioEndTimer = setTimeout(() => {
+     if (modelAudio && !modelAudio.paused && modelAudio.currentTime >= e - 0.15) {
+      finishAudioRange();
+     }
+    }, ms);
+   }).catch(() => {
+    setYtStatus("Could not play audio — tap again · 請再點一次");
     if (ytStopBtn) ytStopBtn.disabled = true;
-    ytPlayingLabel = "";
-    setYtStatus(idleYtTip());
-   }
-  } catch (e) {}
- }, 200);
+   });
+  } else {
+   const ms = Math.max(200, (e - s) * 1000 + 150);
+   clearAudioTimers();
+   audioEndTimer = setTimeout(() => {
+    if (modelAudio && !modelAudio.paused && modelAudio.currentTime >= e - 0.15) {
+     finishAudioRange();
+    }
+   }, ms);
+  }
+ };
+
+ // Seek then play inside the user-gesture handler
+ if (modelAudio.readyState >= 1) {
+  startPlay();
+ } else {
+  const once = () => { modelAudio.removeEventListener("loadedmetadata", once); startPlay(); };
+  modelAudio.addEventListener("loadedmetadata", once);
+  try { modelAudio.load(); } catch (e2) {}
+  // Still attempt play immediately (iOS often needs play() in the gesture)
+  startPlay();
+ }
 }
 
 function onYtStateChange(ev) {
- // 1 = PLAYING, 0 = ENDED, 2 = PAUSED
+ // 1 = PLAYING — pause local audio so they don't overlap
  if (ev.data === 1) {
-  ytUnlocked = true;
+  pauseModelAudioQuiet();
+  document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
  }
  if (ev.data === 0) {
   clearYtTimers();
@@ -1438,46 +1522,14 @@ function onYtStateChange(ev) {
  }
 }
 
-function playWithApi(start, end, label) {
- const s = Math.max(0, Math.floor(start));
- const e = Math.max(s + 1, Math.floor(end));
- const rangeTxt = s + "s–" + e + "s";
- if (!ytPlayer || typeof ytPlayer.loadVideoById !== "function") {
-  ytPendingPlay = { start: s, end: e, label: label || "Playing" };
-  setYtStatus("Loading player… · 載入中");
-  return;
- }
- clearYtTimers();
- ytPlayingLabel = label || "Playing";
- setYtStatus(ytPlayingLabel + " · " + rangeTxt + (ytUnlocked ? "" : " · If no sound, tap ▶ / 沒聲音點 ▶"));
- if (ytStopBtn) ytStopBtn.disabled = false;
-
- // Expand so ▶ is visible if the browser still blocks autoplay
- ytForceExpand = true;
- const tab = document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem";
- syncYtLayout(tab);
-
- try {
-  ytPlayer.loadVideoById({
-   videoId: YT_ID,
-   startSeconds: s,
-   endSeconds: e
-  });
-  try { ytPlayer.playVideo(); } catch (e2) {}
-  startRangeWatch(e);
- } catch (err) {
-  setYtStatus("Could not play — tap ▶ on the video · 請點影片 ▶");
- }
-}
-
 function playYtRange(start, end, label) {
  ytPlayingLabel = label || "Playing";
  const rangeTxt = Math.floor(start) + "s–" + Math.floor(end) + "s";
  if (ytStopBtn) ytStopBtn.disabled = false;
 
- // YouTube usually blocks / blanks in-page embeds when the HTML is opened from Downloads (file://).
- // Reuse one https embed window instead — still driven by the stanza tap.
+ // file:// : relative m4a usually won't load — keep YouTube popup fallback
  if (isFilePage) {
+  pauseModelAudioQuiet();
   const url = ytEmbedUrl(start, end, true);
   try {
    if (ytPopup && !ytPopup.closed) {
@@ -1487,22 +1539,25 @@ function playYtRange(start, end, label) {
     ytPopup = window.open(url, "u47ModelPlayer", "popup=yes,width=560,height=320");
    }
    if (!ytPopup) {
-    setYtStatus("Allow pop-ups once, then tap again · 請允許彈出式視窗");
+    setYtStatus("Allow pop-ups once, then tap again · 請允許彈出式視窗 — or open the https Pages link for audio");
     return;
    }
    setYtStatus(ytPlayingLabel + " · " + rangeTxt + " · YouTube window");
   } catch (e) {
-   setYtStatus("Could not open YouTube — check pop-up blocker");
+   setYtStatus("Use https Pages for audio · 請用網頁連結聽音訊");
   }
   return;
  }
 
- playWithApi(start, end, label);
+ // https / http: local HTML5 audio (user-gesture seek+play) — no YouTube autoplay needed
+ playWithLocalAudio(start, end, label);
 }
 
 function stopYt() {
  clearYtTimers();
+ clearAudioTimers();
  ytPendingPlay = null;
+ pauseModelAudioQuiet();
  if (ytPlayer && typeof ytPlayer.pauseVideo === "function") {
   try { ytPlayer.pauseVideo(); } catch (e) {}
  }
@@ -1511,11 +1566,16 @@ function stopYt() {
  }
  ytPopup = null;
  ytPlayingLabel = "";
+ audioLabel = "";
+ audioRangeEnd = 0;
  if (ytStopBtn) ytStopBtn.disabled = true;
  document.querySelectorAll(".stanza.playing").forEach(x => x.classList.remove("playing"));
- setYtStatus(isFilePage
-  ? "Tap a stanza · opens YouTube window · 點詩節（本機檔會開小窗）"
-  : idleYtTip());
+ setYtStatus(idleYtTip());
+}
+
+if (modelAudio) {
+ modelAudio.addEventListener("timeupdate", onModelTimeUpdate);
+ modelAudio.addEventListener("ended", finishAudioRange);
 }
 
 ytStopBtn && (ytStopBtn.onclick = (ev) => { ev.stopPropagation(); stopYt(); });
@@ -1555,22 +1615,16 @@ window.onYouTubeIframeAPIReady = function () {
   events: {
    onReady: function (ev) {
     ytPlayer = ev.target;
-    if (ytPendingPlay) {
-     const p = ytPendingPlay;
-     ytPendingPlay = null;
-     playWithApi(p.start, p.end, p.label);
-    }
    },
    onStateChange: onYtStateChange,
    onError: function () {
-    ytForceExpand = true;
-    syncYtLayout(document.querySelector(".tab-btn.active")?.dataset.tab || "viewPoem");
-    setYtStatus("Player error — tap Show, then ▶ · 請按 Show 再點 ▶");
+    setYtStatus("Video error — audio still works from stanza taps · 影片出錯，點詩節仍可聽音訊");
    }
   }
  });
 };
 
+// Load YouTube API only for visual Model / Show (not required for stanza sound)
 if (!isFilePage) {
  const tag = document.createElement("script");
  tag.src = "https://www.youtube.com/iframe_api";
@@ -1579,9 +1633,9 @@ if (!isFilePage) {
 }
 
 if (isFilePage) {
- setYtStatus("Tap a stanza · opens YouTube window · 點詩節（本機檔會開小窗）");
+ setYtStatus(idleYtTip());
  const hint = document.getElementById("tapHint");
- if (hint) hint.innerHTML = "Local file mode: each stanza opens a small YouTube window (in-page embed is blocked). Allow pop-ups for this file once. · 本機開啟時會開 YouTube 小窗，請允許彈出式視窗。";
+ if (hint) hint.innerHTML = "Local file mode: stanza audio needs the https Pages site (relative m4a will not load from Downloads). Each stanza can open a YouTube window instead — allow pop-ups once. · 本機檔聽不到本頁音訊，請用網頁連結；或允許彈出式視窗開 YouTube。";
 } else {
  setYtStatus(idleYtTip());
 }
